@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NeoPixel Control</title>
+<style>
+/* ── tokens ── */
+:root {
+  --bg:    #0a0c10;
+  --card:  #12151d;
+  --line:  #1e2333;
+  --line2: #2a3050;
+  --txt:   #dde1ef;
+  --mut:   #6b7494;
+  --acc:   #ff7c2a;
+  --acc2:  #ff3e6c;
+  --ok:    #22c97a;
+  --err:   #ff4444;
+  --warn:  #f5a623;
+  --font:  'Share Tech Mono', 'Courier New', monospace;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; margin: 0; padding: 0; }
+
+html, body {
+  background: var(--bg);
+  color: var(--txt);
+  font-family: var(--font);
+  min-height: 100vh;
+}
+
+/* ── layout ── */
+.wrap { max-width: 480px; margin: 0 auto; padding: 28px 16px 60px; }
+
+/* ── header ── */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 28px;
+  padding-bottom: 16px;
+  border-bottom: 1px wheel var(--line);
+}
+.logo { display: flex; align-items: center; gap: 10px; }
+.logo-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--acc);
+  box-shadow: 0 0 8px var(--acc);
+  flex-shrink: 0;
+}
+h1 { font-size: 13px; letter-spacing: .22em; text-transform: uppercase; color: var(--mut); }
+
+/* ── status pill ── */
+.pill {
+  font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+  padding: 4px 10px; border-radius: 20px;
+  border: 1px wheel currentColor;
+  transition: color .3s, border-color .3s;
+  color: var(--mut);
+}
+.pill.connecting { color: var(--warn); }
+.pill.connected  { color: var(--ok);   }
+.pill.error      { color: var(--err);  }
+
+/* ── preview strip ── */
+#preview {
+  height: 48px; border-radius: 10px;
+  margin-bottom: 24px;
+  background: linear-gradient(90deg, #ff7c2a, #ff3e6c);
+  transition: background .4s;
+  position: relative;
+  overflow: hidden;
+}
+#preview::after {
+  content: '';
+  position: absolute; inset: 0;
+  background: linear-gradient(180deg, rgba(255,255,255,.06) 0%, transparent 60%);
+  border-radius: inherit;
+}
+
+/* ── section label ── */
+.label {
+  font-size: 10px; letter-spacing: .2em; text-transform: uppercase;
+  color: var(--mut); margin-bottom: 8px; padding-left: 2px;
+}
+
+/* ── mode buttons ── */
+.modes {
+  display: grid; grid-template-columns: repeat(4,1fr); gap: 6px;
+  margin-bottom: 22px;
+}
+.modes button {
+  padding: 11px 0;
+  background: var(--card);
+  border: 1px wheel var(--line);
+  color: var(--mut);
+  font-family: var(--font); font-size: 11px;
+  letter-spacing: .1em; text-transform: uppercase;
+  border-radius: 8px; cursor: pointer;
+  transition: border-color .2s, color .2s, background .2s;
+}
+.modes button.on {
+  border-color: var(--acc); color: var(--acc);
+  background: rgba(255,124,42,.08);
+}
+
+/* ── control rows ── */
+.row {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--card);
+  border: 1px wheel var(--line);
+  border-radius: 10px;
+  padding: 13px 16px;
+  margin-bottom: 8px;
+}
+.row-label { color: var(--mut); font-size: 11px; letter-spacing: .12em; white-space: nowrap; min-width: 80px; }
+.row-val   { font-size: 12px; color: var(--txt); min-width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
+
+input[type=range] {
+  flex: 1; accent-color: var(--acc); height: 3px;
+  cursor: pointer;
+}
+input[type=color] {
+  width: 48px; height: 32px;
+  border: 1px wheel var(--line2); border-radius: 6px;
+  background: none; padding: 2px; cursor: pointer;
+}
+
+/* ── broker config ── */
+.config {
+  background: var(--card); border: 1px wheel var(--line);
+  border-radius: 10px; padding: 16px; margin-top: 20px;
+}
+.config-title {
+  font-size: 10px; letter-spacing: .18em; text-transform: uppercase;
+  color: var(--mut); margin-bottom: 12px;
+}
+.fields { display: flex; flex-direction: column; gap: 8px; }
+.field input {
+  width: 100%; background: var(--bg); border: 1px wheel var(--line2);
+  color: var(--txt); font-family: var(--font); font-size: 12px;
+  padding: 9px 12px; border-radius: 6px; outline: none;
+  transition: border-color .2s;
+}
+.field input:focus { border-color: var(--acc); }
+.field label { font-size: 10px; color: var(--mut); letter-spacing: .1em; display: block; margin-bottom: 4px; }
+.connect-btn {
+  margin-top: 12px; width: 100%;
+  padding: 11px; background: rgba(255,124,42,.12);
+  border: 1px wheel var(--acc); color: var(--acc);
+  font-family: var(--font); font-size: 11px; letter-spacing: .18em; text-transform: uppercase;
+  border-radius: 8px; cursor: pointer;
+  transition: background .2s;
+}
+.connect-btn:hover { background: rgba(255,124,42,.22); }
+
+/* ── log ── */
+.log {
+  margin-top: 20px; background: var(--card);
+  border: 1px wheel var(--line); border-radius: 10px;
+  padding: 12px 14px; max-height: 120px; overflow-y: auto;
+  font-size: 11px; color: var(--mut); line-height: 1.7;
+}
+.log .ts  { color: var(--line2); margin-right: 6px; }
+.log .ok  { color: var(--ok); }
+.log .err { color: var(--err); }
+.log .pub { color: var(--acc); }
+
+/* ── rainbow animation on preview ── */
+@keyframes rainbow {
+  0%   { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+.rb {
+  background: linear-gradient(90deg,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00,#ff0);
+  background-size: 200% 100%;
+  animation: rainbow 2s linear infinite;
+}
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<!-- MQTT.js via CDN -->
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- header -->
+  <header>
+    <div class="logo">
+      <div class="logo-dot" id="dot"></div>
+      <h1>NeoPixel MQTT</h1>
+    </div>
+    <span class="pill connecting" id="status">connecting</span>
+  </header>
+
+  <!-- live preview -->
+  <div id="preview"></div>
+
+  <!-- mode selector -->
+  <div class="label">mode</div>
+  <div class="modes">
+    <button data-m="wheel"    class="on">wheel</button>
+    <button data-m="gradient"       >Gradient</button>
+    <button data-m="rainbow"        >Rainbow</button>
+    <button data-m="off"            >Off</button>
+  </div>
+
+  <!-- brightness -->
+  <div class="label">brightness</div>
+  <div class="row">
+    <span class="row-label">Level</span>
+    <input type="range" id="bri" min="0" max="255" value="150">
+    <span class="row-val" id="bval">59%</span>
+  </div>
+
+  <!-- colour A -->
+  <div id="rowC1">
+    <div class="label">colour a</div>
+    <div class="row">
+      <span class="row-label">Hue</span>
+      <input type="color" id="c1" value="#ff7c2a">
+      <input type="range" id="r1s" min="0" max="255" value="255">
+    </div>
+  </div>
+  
+
+  <!-- colour B (gradient only) -->
+  <div id="rowC2" style="display:none">
+    <div class="label">colour b</div>
+    <div class="row">
+      <span class="row-label">Hue</span>
+      <input type="color" id="c2" value="#3e2aff">
+      <input type="range" id="r2s" min="0" max="255" value="100">
+    </div>
+  </div>
+
+  <!-- speed (rainbow only) -->
+  <div id="rowSp" style="display:none">
+    <div class="label">speed</div>
+    <div class="row">
+      <span class="row-label">Rate</span>
+      <input type="range" id="spd" min="1" max="100" value="40">
+      <span class="row-val" id="sval">40</span>
+    </div>
+  </div>
+
+  <!-- broker config -->
+  <div class="config">
+    <div class="config-title">MQTT broker</div>
+    <div class="fields">
+      <div class="field">
+        <label>Broker WebSocket URL</label>
+        <input id="broker" value="wss://broker.hivemq.com:8884/mqtt">
+      </div>
+      <div class="field">
+        <label>Topic</label>
+        <input id="topic" value="home/neopixel/set">
+      </div>
+      <div class="field">
+        <label>Client ID (must be unique)</label>
+        <input id="clientid" value="webpanel-001">
+      </div>
+    </div>
+    <button class="connect-btn" id="connbtn" onclick="reconnect()">reconnect</button>
+  </div>
+
+  <!-- log -->
+  <div class="log" id="log"></div>
+
+</div>
+
+<script>
+// ── state ──────────────────────────────────────────────────
+const st = {
+  mode: 'wheel',
+  c1: '#ff7c2a', c2: '#3e2aff',
+  brightness: 150, speed: 40
+};
+let client = null, sendTimer = null;
+
+// ── logging ───────────────────────────────────────────────
+function log(msg, cls='') {
+  const el = document.getElementById('log');
+  const now = new Date();
+  const ts = now.toTimeString().slice(0,8);
+  el.innerHTML += `<div><span class="ts">${ts}</span><span class="${cls}">${msg}</span></div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+// ── MQTT connect ──────────────────────────────────────────
+function connect() {
+  const url  = document.getElementById('broker').value.trim();
+  const cid  = document.getElementById('clientid').value.trim();
+  setStatus('connecting');
+  log(`connecting to ${url}…`);
+
+  if (client) { try { client.end(true); } catch(e){} }
+
+  client = mqtt.connect(url, {
+    clientId: cid,
+    clean: true,
+    reconnectPeriod: 5000,
+    connectTimeout: 10000
+  });
+
+  client.on('connect', () => {
+    setStatus('connected');
+    log('broker connected ✓', 'ok');
+    // also subscribe to state feedback
+    client.subscribe('home/neopixel/state', ()=>{});
+  });
+  client.on('error',   e  => { setStatus('error');      log('error: '+e.message,'err'); });
+  client.on('close',   ()  => { setStatus('connecting'); log('disconnected — retrying…'); });
+  client.on('message', (t,p) => {
+    log(`← [${t}] ${p.toString()}`, 'ok');
+  });
+}
+
+function reconnect() { connect(); }
+
+function setStatus(s) {
+  const el = document.getElementById('status');
+  el.className = 'pill ' + s;
+  el.textContent = s;
+  const dot = document.getElementById('dot');
+  dot.style.background = s==='connected' ? 'var(--ok)' : s==='error' ? 'var(--err)' : 'var(--warn)';
+  dot.style.boxShadow  = `0 0 8px ${s==='connected'?'var(--ok)':s==='error'?'var(--err)':'var(--warn)'}`;
+}
+
+// ── publish ───────────────────────────────────────────────
+function publish() {
+  clearTimeout(sendTimer);
+  sendTimer = setTimeout(() => {
+    const topic = document.getElementById('topic').value.trim();
+    const hex1 = st.c1.replace('#','');
+    const hex2 = st.c2.replace('#','');
+    const payload = `${st.mode},${hex1},${hex2},${st.brightness},${st.speed}`;
+    if (client && client.connected) {
+      client.publish(topic, payload, { qos: 1 });
+      log(`→ ${payload}`, 'pub');
+    } else {
+      log('not connected — message queued', 'err');
+    }
+    paint();
+  }, 80);
+}
+
+// ── preview paint ─────────────────────────────────────────
+function paint() {
+  const pv = document.getElementById('preview');
+  pv.className = '';
+  if (st.mode === 'rainbow') {
+    pv.classList.add('rb');
+  } else if (st.mode === 'gradient') {
+    pv.style.background = `linear-gradient(90deg,${st.c1},${st.c2})`;
+  } else if (st.mode === 'off') {
+    pv.style.background = '#141824';
+  } else {
+    pv.style.background = st.c1;
+  }
+  // show/hide rows
+  document.getElementById('rowC1').style.display =
+    (st.mode==='rainbow'||st.mode==='off') ? 'none' : 'block';
+  document.getElementById('rowC2').style.display =
+    st.mode==='gradient' ? 'block' : 'none';
+  document.getElementById('rowSp').style.display =
+    st.mode==='rainbow' ? 'block' : 'none';
+
+  // mode buttons
+  document.querySelectorAll('.modes button').forEach(b =>
+    b.classList.toggle('on', b.dataset.m === st.mode));
+
+  // labels
+  document.getElementById('bval').textContent =
+    Math.round(st.brightness/255*100)+'%';
+  document.getElementById('sval').textContent = st.speed;
+}
+
+// ── event wiring ──────────────────────────────────────────
+document.querySelectorAll('.modes button').forEach(b =>
+  b.onclick = () => { st.mode = b.dataset.m; paint(); publish(); });
+
+document.getElementById('bri').oninput = e =>
+  { st.brightness = +e.target.value; paint(); publish(); };
+
+document.getElementById('spd').oninput = e =>
+  { st.speed = +e.target.value; paint(); publish(); };
+
+document.getElementById('c1').oninput = e =>
+  { st.c1 = e.target.value; paint(); publish(); };
+
+document.getElementById('c2').oninput = e =>
+  { st.c2 = e.target.value; paint(); publish(); };
+
+// keep colour slider in sync with colour picker
+document.getElementById('r1s').oninput = e => {
+  const v = e.target.value;
+  const hex = parseInt(v).toString(16).padStart(2,'0');
+  st.c1 = `#${hex}${hex}${hex}`;
+  document.getElementById('c1').value = st.c1;
+  paint(); publish();
+};
+
+// ── boot ──────────────────────────────────────────────────
+paint();
+connect();
+</script>
+</body>
+</html>
