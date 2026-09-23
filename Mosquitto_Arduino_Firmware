@@ -1,0 +1,219 @@
+/*
+ * ============================================================
+ *  NeoPixel MQTT Controller — Wemos D1 Mini (ESP8266)
+ * ============================================================
+ *  THIS is the sketch that pairs with neopixel_panel.html.
+ *
+ *  (neopixel_wifi_controller.ino is a DIFFERENT project: a local
+ *   HTTP web server. It has no MQTT code and cannot hear the panel.)
+ *
+ *  Flow:  panel  →  HiveMQ broker  →  this ESP  →  NeoPixel strip
+ *
+ *  Libraries (Arduino Library Manager):
+ *    - Adafruit NeoPixel
+ *    - PubSubClient  (by Nick O'Leary)
+ *
+ *  Payload the panel sends:   mode,hex1,hex2,brightness,speed
+ *  e.g.                       wheel,ff29c6,3e2aff,150,40
+ *
+ *  Wiring:
+ *    D2 (GPIO4)  →  330Ω  →  NeoPixel DIN
+ *    5V          →  NeoPixel VCC   (external 5V supply for 16 LEDs —
+ *                                   USB alone browns out and reboots the ESP)
+ *    GND         →  NeoPixel GND   (must be common with the ESP's GND)
+ *    1000µF capacitor across the strip's 5V / GND
+ * ============================================================
+ */
+
+#include <ESP8266WiFi.h>
+#include <PubSubClient.h>
+#include <Adafruit_NeoPixel.h>
+
+// ======================= USER CONFIG ========================
+// Copied from your working web-server sketch — these connect fine.
+// NOTE: the SSID contains a curly apostrophe (’). Keep it exactly.
+const char* WIFI_SSID   = "OnePlus Nord";
+const char* WIFI_PASS   = "vishvak134";
+
+const char* MQTT_SERVER = "broker.hivemq.com";
+const int   MQTT_PORT   = 1883;
+
+// Must be unique on the public broker AND different from the panel's ID
+const char* MQTT_CLIENT = "esp8266-satha-neopixel-7734";
+
+const char* TOPIC_SUB   = "home/neopixel/set";    // panel publishes here
+const char* TOPIC_PUB   = "home/neopixel/state";  // we echo back here
+
+#define LED_PIN   4     // D2 on Wemos D1 Mini
+#define NUM_LEDS  8
+// ============================================================
+
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+WiFiClient   wifi;
+PubSubClient mqtt(wifi);
+
+// ── light state ─────────────────────────────────────────────
+enum Mode { wheel, GRADIENT, RAINBOW, OFF };
+Mode     mode       = wheel;
+uint8_t  r1 = 255, g1 = 124, b1 = 42;   // colour A
+uint8_t  r2 = 62,  g2 = 42,  b2 = 255;  // colour B
+uint8_t  brightness = 150;
+uint8_t  speedVal   = 40;
+uint16_t hueOffset  = 0;
+unsigned long lastFrame   = 0;
+unsigned long lastMqttTry = 0;
+
+// ── colour helpers ───────────────────────────────────────────
+uint8_t lerp8(uint8_t a, uint8_t b, float t) {
+  return (uint8_t)(a + (b - a) * t);
+}
+
+bool hexToRGB(String h, uint8_t &r, uint8_t &g, uint8_t &b) {
+  if (h.length() != 6) return false;
+  long v = strtol(h.c_str(), nullptr, 16);
+  r = (v >> 16) & 0xFF;  g = (v >> 8) & 0xFF;  b = v & 0xFF;
+  return true;
+}
+
+// ── rendering ────────────────────────────────────────────────
+void renderWheel() {
+  for (int i = 0; i < NUM_LEDS; i++)
+    strip.setPixelColor(i, strip.Color(r1, g1, b1));
+}
+
+void renderGradient() {
+  for (int i = 0; i < NUM_LEDS; i++) {
+    float t = (NUM_LEDS > 1) ? (float)i / (NUM_LEDS - 1) : 0;
+    strip.setPixelColor(i, strip.Color(lerp8(r1, r2, t),
+                                       lerp8(g1, g2, t),
+                                       lerp8(b1, b2, t)));
+  }
+}
+
+void renderRainbow() {
+  for (int i = 0; i < NUM_LEDS; i++) {
+    uint16_t hue = hueOffset + (uint32_t)i * 65536UL / NUM_LEDS;
+    strip.setPixelColor(i, strip.gamma32(strip.ColorHSV(hue)));
+  }
+}
+
+void applyState() {
+  strip.setBrightness(brightness);
+  switch (mode) {
+    case wheel:    renderWheel();    break;
+    case GRADIENT: renderGradient(); break;
+    case RAINBOW:  renderRainbow();  break;
+    default:       strip.clear();    break;
+  }
+  strip.show();
+}
+
+// ── parse incoming payload:  mode,hex1,hex2,brightness,speed ──
+void parsePayload(String msg) {
+  Serial.println("Received: " + msg);
+
+  String parts[5];
+  int idx = 0; String tok;
+  for (unsigned int i = 0; i <= msg.length() && idx < 5; i++) {
+    char c = (i < msg.length()) ? msg[i] : ',';
+    if (c == ',') { parts[idx++] = tok; tok = ""; }
+    else tok += c;
+  }
+  if (idx < 5) { Serial.println("  bad payload (need 5 fields)"); return; }
+
+  String m = parts[0]; m.toLowerCase();
+  if      (m == "wheel")    mode = wheel;
+  else if (m == "gradient") mode = GRADIENT;
+  else if (m == "rainbow")  mode = RAINBOW;
+  else                      mode = OFF;
+
+  hexToRGB(parts[1], r1, g1, b1);
+  hexToRGB(parts[2], r2, g2, b2);
+  brightness = constrain(parts[3].toInt(), 0, 255);
+  speedVal   = constrain(parts[4].toInt(), 1, 100);
+
+  applyState();
+  mqtt.publish(TOPIC_PUB, msg.c_str());   // echo back so the panel logs "←"
+}
+
+// ── MQTT callback — fires on every incoming message ──────────
+void onMessage(char* topic, byte* payload, unsigned int length) {
+  String msg;
+  for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
+  parsePayload(msg);
+}
+
+// ── WiFi — never reboots, just keeps retrying ────────────────
+void connectWiFi() {
+  if (WiFi.status() == WL_CONNECTED) return;
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.printf("\nWiFi: connecting to \"%s\"\n", WIFI_SSID);
+
+  unsigned long t = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t < 20000) {
+    delay(500);
+    // 1 = SSID not found   4 = wrong password   6 = disconnected/searching
+    Serial.printf("  status=%d\n", WiFi.status());
+  }
+
+  if (WiFi.status() == WL_CONNECTED)
+    Serial.println("WiFi OK: " + WiFi.localIP().toString());
+  else
+    Serial.println("WiFi not up yet — retrying (no reboot)");
+}
+
+// ── MQTT — one attempt every 5 s, non-blocking ───────────────
+void connectMQTT() {
+  if (lastMqttTry != 0 && millis() - lastMqttTry < 5000) return;
+  lastMqttTry = millis();
+
+  Serial.print("MQTT: connecting to ");
+  Serial.print(MQTT_SERVER);
+  Serial.print(" … ");
+
+  if (mqtt.connect(MQTT_CLIENT)) {
+    Serial.println("connected!");
+    mqtt.subscribe(TOPIC_SUB, 1);
+    Serial.println("Subscribed to: " + String(TOPIC_SUB));
+  } else {
+    // -2 = can't reach broker   -4 = timeout   5 = not authorised
+    Serial.printf("failed rc=%d (retry in 5 s)\n", mqtt.state());
+  }
+}
+
+// ── setup ────────────────────────────────────────────────────
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+
+  strip.begin();
+  brightness = 40; r1 = 255; g1 = 80; b1 = 0;   // dim orange = "alive"
+  applyState();
+
+  connectWiFi();
+
+  mqtt.setServer(MQTT_SERVER, MQTT_PORT);
+  mqtt.setCallback(onMessage);
+  mqtt.setKeepAlive(30);
+  mqtt.setBufferSize(512);
+}
+
+// ── loop ─────────────────────────────────────────────────────
+void loop() {
+  if (WiFi.status() != WL_CONNECTED) { connectWiFi(); return; }
+  if (!mqtt.connected())              { connectMQTT(); }
+
+  mqtt.loop();   // receives messages — must run every iteration
+
+  if (mode == RAINBOW) {
+    uint16_t interval = map(speedVal, 1, 100, 120, 8);
+    if (millis() - lastFrame >= interval) {
+      lastFrame = millis();
+      hueOffset += 512;
+      renderRainbow();
+      strip.show();
+    }
+  }
+}
